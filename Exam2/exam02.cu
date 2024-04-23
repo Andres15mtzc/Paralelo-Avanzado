@@ -8,7 +8,7 @@
 #include <vector>
 #include <cassert>
 
-__global__ void es_seguro_parallel(char* tablero, int* cond, int* fila, int* columna, int* num);
+__global__ void es_seguro_parallel(char* tablero, int* cond1, int* cond2, int* cond3, int* fila, int* columna, char* num);
 
 class ValidateSudoku {
 private:
@@ -61,32 +61,47 @@ private:
     }
 
     bool es_seguro_gpu(int h_fila, int h_columna, char h_num) {
+        std::vector<char> linear_board;
+        for (const auto& row : tablero) {
+            linear_board.insert(linear_board.end(), row.begin(), row.end());
+        }
         char* d_board;
         cudaMalloc((void**)&d_board, 81 * sizeof(char));
-        cudaMemcpy(d_board, tablero.data(), 81 * sizeof(char), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_board, linear_board.data(), 81 * sizeof(char), cudaMemcpyHostToDevice);
 
-        int* d_solved, *d_fila, *d_columna, *d_num;
-        cudaMalloc((void**)&d_solved, sizeof(int));
+        int* d_solved_fila, * d_solved_col, * d_solved_sub, * d_fila, * d_columna;
+        char* d_num;
+        cudaMalloc((void**)&d_solved_fila, sizeof(int));
+        cudaMalloc((void**)&d_solved_col, sizeof(int));
+        cudaMalloc((void**)&d_solved_sub, sizeof(int));
         cudaMalloc((void**)&d_fila, sizeof(int));
         cudaMalloc((void**)&d_columna, sizeof(int));
-        cudaMalloc((void**)&d_num, sizeof(int));
-        int h_solved = 0;
-        cudaMemcpy(d_solved, &h_solved, sizeof(int), cudaMemcpyHostToDevice);
+        cudaMalloc((void**)&d_num, sizeof(char));
+        int h_solved_fila = 0;
+        int h_solved_col = 0;
+        int h_solved_sub = 0;
+        cudaMemcpy(d_solved_fila, &h_solved_fila, sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_solved_col, &h_solved_col, sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_solved_sub, &h_solved_sub, sizeof(int), cudaMemcpyHostToDevice);
         cudaMemcpy(d_fila, &h_fila, sizeof(int), cudaMemcpyHostToDevice);
         cudaMemcpy(d_columna, &h_columna, sizeof(int), cudaMemcpyHostToDevice);
-        cudaMemcpy(d_num, &h_num, sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(d_num, &h_num, sizeof(char), cudaMemcpyHostToDevice);
 
-        es_seguro_parallel << <4, 8 >> > (d_board, d_solved, d_fila, d_columna, d_num);
+        es_seguro_parallel << <32, 1 >> > (d_board, d_solved_fila, d_solved_col, d_solved_sub, d_fila, d_columna, d_num);
 
-        cudaMemcpy(&h_solved, d_solved, sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&h_solved_fila, d_solved_fila, sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&h_solved_col, d_solved_col, sizeof(int), cudaMemcpyDeviceToHost);
+        cudaMemcpy(&h_solved_sub, d_solved_sub, sizeof(int), cudaMemcpyDeviceToHost);
 
         cudaFree(d_board);
-        cudaFree(d_solved);
+        cudaFree(d_solved_fila);
+        cudaFree(d_solved_col);
+        cudaFree(d_solved_sub);
         cudaFree(d_fila);
         cudaFree(d_columna);
         cudaFree(d_num);
 
-        return h_solved != 1;
+        return (h_solved_fila == 0 && h_solved_col == 0 && h_solved_sub == 0);
     }
 
 public:
@@ -175,7 +190,7 @@ public:
             if (es_seguro_gpu(fila, columna, num)) {
                 tablero[fila][columna] = num; // Asignar el número si es seguro
 
-                if (solucionar_sudoku()) {
+                if (solucionar_sudoku_parallel()) {
                     return true; // Si el número asignado lleva a una solución, retornar true
                 }
 
@@ -183,6 +198,26 @@ public:
             }
         }
         return false; // No hay solución para este estado del Sudoku
+    }
+
+    bool solucionar_sudoku_parallel_montecarlo(double p) {
+        // Lógica de resolución de Sudoku 
+        int fila, columna;
+        if (!encontrar_casilla_vacia(fila, columna)) {
+            return true;
+        }
+
+        for (char num = '1'; num <= '9'; ++num) {
+            if (es_seguro_gpu(fila, columna, num)) {
+                tablero[fila][columna] = num;
+                if (solucionar_sudoku_parallel_montecarlo(p) && rand() / (double)RAND_MAX < p) {
+                    return true;
+                }
+                tablero[fila][columna] = '.';
+            }
+        }
+        return false;
+
     }
 
     void imprimir_tablero() {
@@ -196,29 +231,29 @@ public:
 
 };
 
-__global__ void es_seguro_parallel(char* tablero, int* cond, int* fila, int* columna, int* num) {
+__global__ void es_seguro_parallel(char* tablero, int* cond1, int* cond2, int* cond3, int* fila, int* columna, char* num) {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
     if (idx >= 0 && idx < 9) {
-        if (tablero[9 * *fila + idx] == *num) *cond = 1;
+        if (tablero[9 * *fila + idx] == *num) *cond1 = 1;
+        return;
     }
     else if (idx >= 9 && idx < 18) {
-        if (tablero[9 * (idx-9) + *columna] == *num) *cond = 1;
+        if (tablero[9 * (idx - 9) + *columna] == *num) *cond2 = 1;
+        return;
     }
-    else if (idx >= 18 && idx < 21) {
-        if (tablero[9 * ((idx - 18) + *fila - *fila % 3) + *(columna - *columna % 3)] == *num) *cond = 1;
+    else if (idx >= 18 && idx < 27) {
+        int row = *fila - *fila % 3;
+        int col = (idx - 18) % 3 + *columna - *columna % 3;
+        if (tablero[9 * row + col] == *num) *cond3 = 1;
+        return;
     }
-    else if (idx >= 21 && idx < 24) {
-        if (tablero[9 * ((idx - 21) + *fila - *fila % 3) + (1 + *columna - *columna % 3)] == *num) *cond = 1;
-    }
-    else if (idx >= 24 && idx < 27) {
-        if (tablero[9 * ((idx - 24) + *fila - *fila % 3) + (2 + *columna - *columna % 3)] == *num) *cond = 1;
-    }
+    return;
 }
 
 int main()
 {
     std::vector<std::vector<char>> board = {
-        {'5', '3', '.', '.', '7', '.', '.', '.', '.'},
+        {'5', '3', '4', '6', '7', '8', '.', '1', '.'},
         {'6', '.', '.', '1', '9', '5', '.', '.', '.'},
         {'.', '9', '8', '.', '.', '.', '.', '6', '.'},
         {'8', '.', '.', '.', '6', '.', '.', '.', '3'},
@@ -255,14 +290,16 @@ int main()
     printf("El tiempo de ejecucion en CPU es %lf\n", cpu_time_taken);
 
     //GPU
+    ValidateSudoku sudoku2(board);
+
     printf("\nGPU\n");
     clock_t gpu_start, gpu_stop;
     double gpu_time_taken;
 
     gpu_start = clock();
-    if (sudoku.solucionar_sudoku_parallel()) {
+    if (sudoku2.solucionar_sudoku_parallel()) {
         std::cout << "El Sudoku ha sido resuelto:" << std::endl;
-        sudoku.imprimir_tablero();
+        sudoku2.imprimir_tablero();
     }
     else {
         std::cout << "No hay solución para el Sudoku proporcionado." << std::endl;
@@ -271,6 +308,28 @@ int main()
 
     gpu_time_taken = ((double)(gpu_stop - gpu_start)) / CLOCKS_PER_SEC;
     printf("El tiempo de ejecucion en GPU es %lf\n", gpu_time_taken);
+
+    // Montecarlo
+    ValidateSudoku sudoku3(board);
+
+    printf("\nMonte Carlo Optimization\n");
+    clock_t mc_start, mc_stop;
+    double mc_time_taken;
+
+    double p = 0.5;
+    mc_start = clock();
+
+    if (sudoku3.solucionar_sudoku_parallel_montecarlo(p)) {
+        std::cout << "El Sudoku ha sido resuelto:" << std::endl;
+        sudoku3.imprimir_tablero();
+    }
+    else {
+        std::cout << "No hay solución para el Sudoku proporcionado." << std::endl;
+    }
+
+    mc_stop = clock();
+    mc_time_taken = ((double)(mc_stop - mc_start)) / CLOCKS_PER_SEC;
+    printf("El tiempo de ejecucion en Monte Carlo con p = %lf es %lf\n", p, mc_time_taken);
 
     return 0;
 }
