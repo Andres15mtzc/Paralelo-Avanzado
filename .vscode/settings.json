@@ -1,0 +1,7 @@
+{
+    "files.associations": {
+        "ctime": "cpp",
+        "iostream": "cpp",
+        "xiosbase": "cpp"
+    }
+}
